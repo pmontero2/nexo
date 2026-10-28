@@ -34,7 +34,23 @@ const equipmentStatuses: EquipmentStatus[] = ['Disponible', 'En mantención', 'F
 function dayOffset(days: number) {
   const date = new Date();
   date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+const equipmentReservationStatuses: Status[] = ['Aprobada', 'En ejecución'];
+
+function isEquipmentAvailableForRequest(equipment: Equipment, request: RequestRow, requests: RequestRow[]) {
+  if (equipment.status !== 'Disponible') return false;
+  return !requests.some(reservation =>
+    reservation.id !== request.id &&
+    reservation.equipmentId === equipment.id &&
+    reservation.date === request.date &&
+    equipmentReservationStatuses.includes(reservation.status) &&
+    reservation.start < request.end && request.start < reservation.end
+  );
 }
 
 function makeInitialStore(): Store {
@@ -160,7 +176,7 @@ function App() {
     } else if (action.kind === 'aprobar') {
       const equipmentId = String(form.get('equipmentId') || '');
       const equipment = store.equipment.find(item => item.id === equipmentId);
-      if (!equipment || equipment.status !== 'Disponible' || equipment.model !== request.model) {
+      if (!equipment || equipment.model !== request.model || !isEquipmentAvailableForRequest(equipment, request, store.requests)) {
         setNotice('Elige un equipo compatible que esté disponible.');
         return;
       }
@@ -186,10 +202,16 @@ function App() {
   function createRequest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const start = String(form.get('start'));
+    const end = String(form.get('end'));
+    if (end <= start) {
+      setNotice('La hora de término debe ser posterior a la hora de inicio.');
+      return;
+    }
     const next: RequestRow = {
       id: `DEMO-${String(Date.now()).slice(-5)}`, client: store.profile.company,
-      model: String(form.get('model')), date: String(form.get('date')), start: String(form.get('start')),
-      end: String(form.get('end')), site: String(form.get('site')).trim(), work: String(form.get('work')).trim(),
+      model: String(form.get('model')), date: String(form.get('date')), start,
+      end, site: String(form.get('site')).trim(), work: String(form.get('work')).trim(),
       status: 'Pendiente', created: dayOffset(0), history: ['Solicitud enviada desde el simulador.'],
     };
     commit(previous => ({ ...previous, requests: [next, ...previous.requests] }));
@@ -236,7 +258,10 @@ function App() {
 
   const activeNav = store.role === 'Operaciones' ? operationsNav : clientNav;
   const clientRequests = useMemo(() => store.requests.filter(request => request.client === store.profile.company), [store.requests, store.profile.company]);
-  const availableEquipment = store.equipment.filter(item => item.status === 'Disponible');
+  const actionRequest = action ? store.requests.find(item => item.id === action.requestId) : undefined;
+  const availableEquipment = store.equipment.filter(item => action?.kind === 'aprobar' && actionRequest
+    ? isEquipmentAvailableForRequest(item, actionRequest, store.requests)
+    : item.status === 'Disponible');
   const title = store.role ? page : 'Bienvenido al simulador';
 
   if (!store.role) return <Welcome theme={theme} onToggleTheme={toggleTheme} onChoose={chooseRole} />;
@@ -280,7 +305,7 @@ function App() {
       </main>
       <footer className="app-footer"><span>NEXO · PORTAFOLIO</span><span>Datos de demostración · Sin conexión externa</span></footer>
     </div>
-    {action && <ActionDialog action={action} request={store.requests.find(item => item.id === action.requestId)!} equipment={store.equipment} availableEquipment={availableEquipment} onClose={() => setAction(null)} onSubmit={handleActionSubmit} />}
+    {action && actionRequest && <ActionDialog action={action} request={actionRequest} equipment={store.equipment} availableEquipment={availableEquipment} onClose={() => setAction(null)} onSubmit={handleActionSubmit} />}
   </div>;
 }
 
@@ -485,7 +510,7 @@ function OperationsPanel({ store, onNavigate, onAction, onStatus, onAssign }: { 
   const rows = store.requests.filter(item => filter === 'Todas' || item.status === filter);
   return <><PageIntro kicker="GESTIÓN DE SERVICIOS" title="Solicitudes y seguimiento" description="Revisa solicitudes, asigna recursos y registra cada avance del servicio." action={<button className="button button-outline" onClick={() => onNavigate('Agenda de operaciones')}><CalendarRange size={16} /> Ver agenda</button>} />
     <div className="filter-bar"><label>Filtrar por estado <select value={filter} onChange={event => setFilter(event.target.value)}>{['Todas', ...Object.values(statusLabels)].map(status => <option key={status}>{status}</option>)}</select></label><span>{rows.length} servicios</span></div>
-    <div className="ops-request-list">{rows.map(request => { const availableForModel = store.equipment.filter(item => item.model === request.model && item.status === 'Disponible'); const assigned = store.assignments[request.id] ?? []; return <article className="ops-request-card" key={request.id}><div className="ops-request-top"><div><span className="request-id">{request.id}</span><h3>{request.client}</h3></div><StatusPill status={request.status} /></div><div className="ops-facts"><span><Truck size={15} />{request.model}</span><span><CalendarDays size={15} />{dateLabel(request.date)} · {request.start}–{request.end}</span><span><Building2 size={15} />{request.site}</span></div><p className="request-work">{request.work}</p>{request.status === 'No atendida' && <div className="reason-note"><AlertTriangle size={15} /><span><strong>No atendida:</strong> {reasonLabel(request.reason)}{request.reasonNote ? ` — ${request.reasonNote}` : ''}</span></div>}
+    <div className="ops-request-list">{rows.map(request => { const availableForModel = store.equipment.filter(item => item.model === request.model && isEquipmentAvailableForRequest(item, request, store.requests)); const assigned = store.assignments[request.id] ?? []; return <article className="ops-request-card" key={request.id}><div className="ops-request-top"><div><span className="request-id">{request.id}</span><h3>{request.client}</h3></div><StatusPill status={request.status} /></div><div className="ops-facts"><span><Truck size={15} />{request.model}</span><span><CalendarDays size={15} />{dateLabel(request.date)} · {request.start}–{request.end}</span><span><Building2 size={15} />{request.site}</span></div><p className="request-work">{request.work}</p>{request.status === 'No atendida' && <div className="reason-note"><AlertTriangle size={15} /><span><strong>No atendida:</strong> {reasonLabel(request.reason)}{request.reasonNote ? ` — ${request.reasonNote}` : ''}</span></div>}
         <div className="assignment-strip"><div><Users size={16} /><span>Personal asignado</span></div><div className="assignment-controls"><span>{assigned.length ? assigned.join(' · ') : 'Sin asignar'}</span><select aria-label={`Personal para ${request.id}`} defaultValue=""><option value="" disabled>Selecciona personal…</option>{staff.filter(person => !assigned.includes(person)).map(person => <option key={person}>{person}</option>)}</select><button className="small-button" onClick={event => { const select = event.currentTarget.previousElementSibling as HTMLSelectElement; if (select.value) { onAssign(request.id, select.value); select.value = ''; } }}><Plus size={14} /> Asignar</button></div></div>
         <div className="ops-actions">{request.status === 'Pendiente' && <><button className="small-button" onClick={() => onStatus(request.id, 'En revisión')}><Check size={14} /> Iniciar revisión</button><button className="small-button danger-outline" onClick={() => onAction({ kind: 'no-atendida', requestId: request.id })}>No atendida</button></>}{request.status === 'En revisión' && <><button className="small-button primary-small" disabled={availableForModel.length === 0} onClick={() => onAction({ kind: 'aprobar', requestId: request.id })}><Check size={14} /> Aprobar y asignar equipo</button><button className="small-button danger-outline" onClick={() => onAction({ kind: 'no-atendida', requestId: request.id })}>No atendida</button>{availableForModel.length === 0 && <span className="inline-warning"><AlertTriangle size={14} /> Sin equipo compatible disponible</span>}</>}{request.status === 'Aprobada' && <button className="small-button primary-small" onClick={() => onStatus(request.id, 'En ejecución')}><Truck size={14} /> Iniciar servicio</button>}{request.status === 'En ejecución' && <button className="small-button primary-small" onClick={() => onAction({ kind: 'cerrar', requestId: request.id })}><CheckCircle2 size={14} /> Cerrar y registrar operación</button>}{request.status === 'Terminada' && <span className="closed-note"><CheckCircle2 size={15} /> Servicio cerrado · datos internos en Resumen de costos</span>}</div>
       </article>; })}</div>
